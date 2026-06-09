@@ -1,0 +1,112 @@
+name: CI/CD — game2048
+
+on:
+  push:
+    branches:
+      - dev
+      - master
+  pull_request:
+    branches:
+      - dev
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/game2048
+
+jobs:
+  # ──────────────────────────────────────────
+  # Job 1: Lint Helm chart (all triggers)
+  # ──────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint ./helm/game2048
+
+  # ──────────────────────────────────────────
+  # Job 2: Build & Push Docker image
+  # Pushes on: push to dev or master
+  # Dry-run on: pull_request
+  # ──────────────────────────────────────────
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # push to master → tag as 'latest' + short SHA
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=sha,prefix=,format=short,enable=${{ github.ref == 'refs/heads/master' }}
+            # push to dev → tag as 'dev-<sha>'
+            type=sha,prefix=dev-,format=short,enable=${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ──────────────────────────────────────────
+  # Job 3: Deploy via Helm
+  # Runs only on merge to master
+  # ──────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Deploy
+        run: |
+          helm upgrade --install game2048 ./helm/game2048 \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-push.outputs.image_tag }} \
+            --set image.pullPolicy=Always \
+            --atomic \
+            --timeout 3m
