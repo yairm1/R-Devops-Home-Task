@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/game2048
+  IMAGE_NAME: ${{ github.repository_owner }}/snap-game2048
 
 jobs:
   # ──────────────────────────────────────────
@@ -61,7 +61,8 @@ jobs:
 
   # ──────────────────────────────────────────
   # Job 3: Build and push snapshot image
-  # Tag format: snapshot-pr<number>-<short-sha>
+  # Tag format: v<appVersion>-pr<number>-g<sha>  (mirrors propen_image_build convention)
+  # Image repo: snap-game2048  (distinguishes snapshots from releases)
   # ──────────────────────────────────────────
   build-push:
     name: Build & Push Snapshot Image
@@ -72,11 +73,22 @@ jobs:
       packages: write
 
     outputs:
-      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:snapshot-pr${{ github.event.pull_request.number }}-${{ github.sha }}
+      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.ver.outputs.appver }}-pr${{ github.event.pull_request.number }}-g${{ steps.sha.outputs.short }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short=7 ${{ github.sha }})" >> "$GITHUB_OUTPUT"
+
+      - name: Get appVersion from Chart.yaml
+        id: ver
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "appver=$(yq '.appVersion' helm/game2048/Chart.yaml | tr -d '\"')" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -90,7 +102,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:snapshot-pr${{ github.event.pull_request.number }}-${{ github.sha }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.ver.outputs.appver }}-pr${{ github.event.pull_request.number }}-g${{ steps.sha.outputs.short }}
 
   # ──────────────────────────────────────────
   # Job 4: Docker image vulnerability scan
