@@ -219,17 +219,34 @@ jobs:
           git push
 
   # ──────────────────────────────────────────
-  # Job 7: Trigger ArgoCD sync
-  # ArgoCD watches master and auto-syncs, but we force
-  # an immediate sync here so deployment doesn't wait
-  # for the 3-minute polling cycle.
-  # Requires ARGOCD_SERVER and ARGOCD_TOKEN secrets.
+  # Job 7: Trigger ArgoCD Sync
+  #
+  # PURPOSE:
+  #   ArgoCD already watches master and auto-syncs every ~3 minutes.
+  #   This job forces an IMMEDIATE sync so the deployment happens
+  #   right after the version bump, without waiting for the poll cycle.
+  #
+  # HOW IT WORKS:
+  #   - Installs the ArgoCD CLI on the runner
+  #   - Calls `argocd app sync` to trigger a sync remotely via ArgoCD API
+  #   - Then waits for the app to reach Healthy status before marking success
+  #
+  # REQUIREMENTS (GitHub repo secrets):
+  #   - ARGOCD_SERVER : hostname/IP of the ArgoCD server (e.g. argocd.example.com)
+  #   - ARGOCD_TOKEN  : ArgoCD API token (generate with `argocd account generate-token`)
+  #
+  # LOCAL DEVELOPMENT NOTE:
+  #   When ArgoCD runs locally (Docker Desktop), the GitHub Actions runner
+  #   cannot reach localhost:8080. In that case this job will fail gracefully
+  #   (continue-on-error: true) and ArgoCD will still auto-sync within ~3 minutes.
+  #   For production, expose ArgoCD via a LoadBalancer or Ingress and set the secrets.
   # ──────────────────────────────────────────
   deploy:
     name: Trigger ArgoCD Sync
     runs-on: ubuntu-latest
     needs: [security-scan, bump-and-tag]
     environment: production
+    continue-on-error: true  # gracefully skip if ARGOCD_SERVER is not reachable (local dev)
 
     steps:
       - name: Install ArgoCD CLI
