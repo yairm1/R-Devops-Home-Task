@@ -1,13 +1,9 @@
-name: CI/CD — game2048
+name: PRaccept – Build, push release image and deploy
 
 on:
   push:
     branches:
-      - dev
       - master
-  pull_request:
-    branches:
-      - dev
 
 env:
   REGISTRY: ghcr.io
@@ -15,7 +11,7 @@ env:
 
 jobs:
   # ──────────────────────────────────────────
-  # Job 1: Lint Helm chart (all triggers)
+  # Job 1: Helm lint
   # ──────────────────────────────────────────
   helm-lint:
     name: Helm Lint
@@ -31,12 +27,11 @@ jobs:
         run: helm lint ./helm/game2048
 
   # ──────────────────────────────────────────
-  # Job 2: Build & Push Docker image
-  # Pushes on: push to dev or master
-  # Dry-run on: pull_request
+  # Job 2: Build and push release image
+  # Tag format: latest + short SHA
   # ──────────────────────────────────────────
   build-push:
-    name: Build & Push Image
+    name: Build & Push Release Image
     runs-on: ubuntu-latest
     needs: helm-lint
     permissions:
@@ -44,14 +39,18 @@ jobs:
       packages: write
 
     outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
+      image_tag: ${{ steps.sha.outputs.short }}
+      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short=7 ${{ github.sha }})" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -64,29 +63,52 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # push to master → tag as 'latest' + short SHA
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
-            type=sha,prefix=,format=short,enable=${{ github.ref == 'refs/heads/master' }}
-            # push to dev → tag as 'dev-<sha>'
-            type=sha,prefix=dev-,format=short,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=latest
+            type=sha,prefix=,format=short
 
-      - name: Build and push
+      - name: Build and push release image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
   # ──────────────────────────────────────────
-  # Job 3: Deploy via Helm
-  # Runs only on merge to master
+  # Job 3: Security scan
+  # ──────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-push
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-push.outputs.full_image }}
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # ──────────────────────────────────────────
+  # Job 4: Deploy via Helm
+  # Requires KUBECONFIG secret to be set
   # ──────────────────────────────────────────
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: build-push
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    needs: [build-push, security-scan]
     environment: production
 
     steps:
