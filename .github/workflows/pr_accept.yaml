@@ -219,33 +219,52 @@ jobs:
           git push
 
   # ──────────────────────────────────────────
-  # Job 7: Deploy via Helm (by immutable version tag)
-  # Requires KUBECONFIG secret
+  # Job 7: Trigger ArgoCD Sync
+  #
+  # PURPOSE:
+  #   ArgoCD already watches master and auto-syncs every ~3 minutes.
+  #   This job forces an IMMEDIATE sync so the deployment happens
+  #   right after the version bump, without waiting for the poll cycle.
+  #
+  # HOW IT WORKS:
+  #   - Installs the ArgoCD CLI on the runner
+  #   - Calls `argocd app sync` to trigger a sync remotely via ArgoCD API
+  #   - Then waits for the app to reach Healthy status before marking success
+  #
+  # REQUIREMENTS (GitHub repo secrets):
+  #   - ARGOCD_SERVER : hostname/IP of the ArgoCD server (e.g. argocd.example.com)
+  #   - ARGOCD_TOKEN  : ArgoCD API token (generate with `argocd account generate-token`)
+  #
+  # LOCAL DEVELOPMENT NOTE:
+  #   When ArgoCD runs locally (Docker Desktop), the GitHub Actions runner
+  #   cannot reach localhost:8080. In that case this job will fail gracefully
+  #   (continue-on-error: true) and ArgoCD will still auto-sync within ~3 minutes.
+  #   For production, expose ArgoCD via a LoadBalancer or Ingress and set the secrets.
   # ──────────────────────────────────────────
   deploy:
-    name: Deploy to Kubernetes
+    name: Trigger ArgoCD Sync
     runs-on: ubuntu-latest
-    needs: [security-scan, build-push]
+    needs: [security-scan, bump-and-tag]
     environment: production
+    continue-on-error: true  # gracefully skip if ARGOCD_SERVER is not reachable (local dev)
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Configure kubectl
-        uses: azure/k8s-set-context@v4
-        with:
-          method: kubeconfig
-          kubeconfig: ${{ secrets.KUBECONFIG }}
-
-      - name: Deploy
+      - name: Install ArgoCD CLI
         run: |
-          helm upgrade --install game2048 ./helm/game2048 \
-            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=${{ needs.build-push.outputs.version }} \
-            --set image.pullPolicy=Always \
-            --atomic \
-            --timeout 3m
+          curl -sSL -o /usr/local/bin/argocd \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+      - name: Trigger sync and wait for healthy
+        run: |
+          argocd app sync game2048 \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --insecure \
+            --timeout 120
+          argocd app wait game2048 \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --insecure \
+            --health \
+            --timeout 120
