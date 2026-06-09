@@ -1,0 +1,154 @@
+name: PRopen – Lint, SAST, build snapshot image
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/snap-game2048
+
+jobs:
+  # ──────────────────────────────────────────
+  # Job 1: Helm lint
+  # ──────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint ./helm/game2048
+
+  # ──────────────────────────────────────────
+  # Job 2: SAST — Semgrep
+  # Fails on ERROR-severity findings (high confidence)
+  # Uploads SARIF to GitHub Security tab (requires Advanced Security on private repos)
+  # ──────────────────────────────────────────
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Semgrep
+        run: pip install semgrep --quiet
+
+      - name: Run Semgrep SAST (fail on ERROR severity)
+        run: semgrep scan --config=auto --error --severity=ERROR --sarif-output=semgrep.sarif .
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true  # requires GitHub Advanced Security on private repos
+        with:
+          sarif_file: semgrep.sarif
+
+  # ──────────────────────────────────────────
+  # Job 3: Build and push snapshot image
+  # Tag format: v<appVersion>-pr<number>-g<sha>  (mirrors propen_image_build convention)
+  # Image repo: snap-game2048  (distinguishes snapshots from releases)
+  # ──────────────────────────────────────────
+  build-push:
+    name: Build & Push Snapshot Image
+    runs-on: ubuntu-latest
+    needs: [helm-lint, sast]
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.ver.outputs.appver }}-pr${{ github.event.pull_request.number }}-g${{ steps.sha.outputs.short }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short=7 ${{ github.sha }})" >> "$GITHUB_OUTPUT"
+
+      - name: Get appVersion from Chart.yaml
+        id: ver
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "appver=$(yq '.appVersion' helm/game2048/Chart.yaml | tr -d '\"')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push snapshot image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.ver.outputs.appver }}-pr${{ github.event.pull_request.number }}-g${{ steps.sha.outputs.short }}
+
+  # ──────────────────────────────────────────
+  # Job 4: Docker image vulnerability scan
+  # Fails on HIGH or CRITICAL — same gate as master
+  # ──────────────────────────────────────────
+  security-scan:
+    name: Image Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build-push
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy (table output for visibility)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-push.outputs.full_image }}
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy (fail on HIGH or CRITICAL with available fix)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-push.outputs.full_image }}
+          format: sarif
+          output: trivy.sarif
+          exit-code: 1
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true  # requires GitHub Advanced Security on private repos
+        with:
+          sarif_file: trivy.sarif

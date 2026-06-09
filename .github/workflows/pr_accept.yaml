@@ -1,0 +1,251 @@
+name: PRaccept – SAST, build release image, deploy
+
+on:
+  push:
+    branches:
+      - master
+
+# Prevent concurrent releases racing each other
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/game2048
+
+jobs:
+  # ──────────────────────────────────────────
+  # Job 1: Helm lint
+  # ──────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint ./helm/game2048
+
+  # ──────────────────────────────────────────
+  # Job 2: SAST — Semgrep
+  # Fails on ERROR-severity findings (high confidence)
+  # ──────────────────────────────────────────
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Semgrep
+        run: pip install semgrep --quiet
+
+      - name: Run Semgrep SAST (fail on ERROR severity)
+        run: semgrep scan --config=auto --error --severity=ERROR --sarif-output=semgrep.sarif .
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true  # requires GitHub Advanced Security on private repos
+        with:
+          sarif_file: semgrep.sarif
+
+  # ──────────────────────────────────────────
+  # Job 3: Compute next semantic version
+  # Reads VERSION file and bumps patch (e.g. 1.0.0 → 1.0.1)
+  # ──────────────────────────────────────────
+  compute-version:
+    name: Compute Next Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Bump patch version from Chart.yaml
+        id: bump
+        run: |
+          CURRENT=$(yq '.appVersion' helm/game2048/Chart.yaml | tr -d '"')
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+          NEXT="${major}.${minor}.$((patch + 1))"
+          echo "Current appVersion: $CURRENT → Next: $NEXT"
+          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+
+  # ──────────────────────────────────────────
+  # Job 4: Build and push release image
+  # Tags: <version> + latest
+  # ──────────────────────────────────────────
+  build-push:
+    name: Build & Push Release Image
+    runs-on: ubuntu-latest
+    needs: [helm-lint, sast, compute-version]
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      version: ${{ needs.compute-version.outputs.version }}
+      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  # ──────────────────────────────────────────
+  # Job 5: Docker image vulnerability scan
+  # Blocks deploy on HIGH or CRITICAL
+  # ──────────────────────────────────────────
+  security-scan:
+    name: Image Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build-push
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy (table output for visibility)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-push.outputs.full_image }}
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy (fail on HIGH or CRITICAL with available fix)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-push.outputs.full_image }}
+          format: sarif
+          output: trivy.sarif
+          exit-code: 1
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true  # requires GitHub Advanced Security on private repos
+        with:
+          sarif_file: trivy.sarif
+
+  # ──────────────────────────────────────────
+  # Job 6: Tag release commit + bump Chart.yaml
+  # Git tag points to the exact merge commit (github.sha)
+  # Chart.yaml bump is a follow-up [skip ci] commit
+  # ──────────────────────────────────────────
+  bump-and-tag:
+    name: Tag Release & Bump Chart.yaml
+    runs-on: ubuntu-latest
+    needs: [security-scan, compute-version]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Create git tag on merge commit
+        run: |
+          git tag "v${{ needs.compute-version.outputs.version }}" "${{ github.sha }}"
+          git push origin "v${{ needs.compute-version.outputs.version }}"
+
+      - name: Bump appVersion and version in Chart.yaml
+        run: |
+          NEW="${{ needs.compute-version.outputs.version }}"
+          yq -i ".appVersion = \"${NEW}\"" helm/game2048/Chart.yaml
+          # also bump chart version patch to keep chart and app versions in sync
+          CHART_VER=$(yq '.version' helm/game2048/Chart.yaml)
+          IFS='.' read -r major minor patch <<< "$CHART_VER"
+          yq -i ".version = \"${major}.${minor}.$((patch + 1))\"" helm/game2048/Chart.yaml
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add helm/game2048/Chart.yaml
+          git commit -m "ci: bump Chart.yaml to appVersion=${NEW} [skip ci]"
+          git push
+
+  # ──────────────────────────────────────────
+  # Job 7: Deploy via Helm (by immutable version tag)
+  # Requires KUBECONFIG secret
+  # ──────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [security-scan, build-push]
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Deploy
+        run: |
+          helm upgrade --install game2048 ./helm/game2048 \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build-push.outputs.version }} \
+            --set image.pullPolicy=Always \
+            --atomic \
+            --timeout 3m
