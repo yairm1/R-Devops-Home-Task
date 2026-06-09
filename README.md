@@ -113,18 +113,33 @@ compute-ver ┘                              └──→ deploy
 |---|---|
 | `helm-lint` | Helm chart validation |
 | `sast` | Semgrep scan, fails on ERROR |
-| `compute-version` | Reads `VERSION` file, bumps patch (e.g. `1.0.0 → 1.0.1`) |
+| `compute-version` | Reads `appVersion` from `Chart.yaml`, bumps patch (e.g. `1.0.0 → 1.0.1`) |
 | `build-push` | Pushes `ghcr.io/.../game2048:1.0.1` + `latest` |
 | `security-scan` | Trivy — blocks deploy on HIGH/CRITICAL |
-| `bump-and-tag` | Creates git tag `v1.0.1` on merge commit + bumps `VERSION` |
-| `deploy` | `helm upgrade --install` using immutable version tag |
+| `bump-and-tag` | Creates git tag `v1.0.1` on merge commit + bumps `Chart.yaml` |
+| `deploy` | Triggers ArgoCD sync for immediate deployment |
+
+### Docker build & registry
+
+Images are built using **Docker BuildKit** via the `docker/build-push-action@v6` GitHub Actions marketplace action. BuildKit is Docker's modern build engine — it's used automatically under the hood and provides:
+- Parallel layer builds (faster)
+- Cache mounts
+- Secure secret mounts (secrets never leaked into image layers)
+- Multi-platform cross-compilation support (`linux/amd64`, `linux/arm64`)
+
+Images are pushed to **GitHub Container Registry (ghcr.io)** — a private registry included with every GitHub account, no extra setup required.
+
+| Image | Registry | Tag format | When |
+|---|---|---|---|
+| `snap-game2048` | `ghcr.io/yairm1/snap-game2048` | `v{ver}-pr{N}-g{sha}` | PR open |
+| `game2048` | `ghcr.io/yairm1/game2048` | `{ver}` + `latest` | Merge to master |
 
 ### Version bumping strategy
 
-- Version is stored in the `VERSION` file at the repo root
-- Each merge to `master` auto-bumps the **patch** version
-- A git tag (`v1.0.1`) is created on the exact merge commit for full traceability
-- Docker image is tagged with the same version — image tag ↔ git tag ↔ source commit
+- `Chart.yaml` is the **single source of truth** for the version (`appVersion` field)
+- Each merge to `master` auto-bumps the **patch** version (e.g. `1.0.4 → 1.0.5`)
+- A git tag (`v1.0.5`) is created on the exact merge commit for full traceability
+- The Docker image tag comes directly from `Chart.AppVersion` — image tag ↔ git tag ↔ source commit ↔ Helm chart are all in sync
 
 ### DevSecOps tools
 
@@ -143,5 +158,8 @@ compute-ver ┘                              └──→ deploy
 
 | Secret | Used in | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | Both workflows | Auto-injected — used for ghcr.io push |
-| `KUBECONFIG` | `pr_accept.yaml` | Base64-encoded kubeconfig for the target cluster |
+| `GITHUB_TOKEN` | Both workflows | Auto-injected — used for ghcr.io push and SARIF upload |
+| `ARGOCD_SERVER` | `pr_accept.yaml` | ArgoCD server hostname/IP (e.g. `argocd.example.com`) |
+| `ARGOCD_TOKEN` | `pr_accept.yaml` | ArgoCD API token — generate with `argocd account generate-token` |
+
+> **Local dev note:** When ArgoCD runs locally (Docker Desktop), the GitHub Actions runner cannot reach `localhost`. The deploy job uses `continue-on-error: true` so the pipeline still passes. ArgoCD auto-syncs within ~3 minutes regardless.
