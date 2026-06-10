@@ -88,36 +88,55 @@ dev       → master (PR)  → pr_open.yaml
 master    ← merge        → pr_accept.yaml
 ```
 
+### Smart path-based triggering
+
+Both workflows use **`dorny/paths-filter@v3`** to detect exactly what changed and skip unnecessary work:
+
+| Changed files | Jobs that run |
+|---|---|
+| `Dockerfile` | helm-lint + SAST + build + scan + version bump |
+| `helm/**` only | helm-lint + chart version bump only (same image redeployed) |
+| `README.md` only | nothing (no deployment needed) |
+
+This means a Helm config change (e.g. resource limits) triggers a redeployment with the **same image** but updated chart — no unnecessary Docker build.
+
 ### `pr_open.yaml` — triggered on PR to `dev`
 
 ```
-helm-lint → sast → build-push (snapshot) → security-scan
+detect ──→ helm-lint (if helm or Dockerfile changed)
+       ├── sast       (if Dockerfile changed)
+       └── build-push (if Dockerfile changed) → security-scan
 ```
 
-| Job | Tool | Behaviour |
+| Job | Runs when | Behaviour |
 |---|---|---|
-| `helm-lint` | Helm | Fails if chart is invalid |
-| `sast` | Semgrep | Scans source + Dockerfile; fails on ERROR-severity findings |
-| `build-push` | Docker + ghcr.io | Pushes `snapshot-pr<N>-<sha>` image |
-| `security-scan` | Trivy | Scans image; **fails on HIGH or CRITICAL** |
+| `detect` | always | Detects which paths changed |
+| `helm-lint` | helm OR Dockerfile changed | Fails if chart is invalid |
+| `sast` | Dockerfile changed | Semgrep scan, fails on ERROR severity |
+| `build-push` | Dockerfile changed | Pushes `snap-game2048:v{ver}-pr{N}-g{sha}` |
+| `security-scan` | Dockerfile changed | Trivy — fails on fixable HIGH/CRITICAL CVEs |
 
 ### `pr_accept.yaml` — triggered on merge to `master`
 
 ```
-helm-lint ──┐
-sast        ├──→ build-push → security-scan ──→ bump-and-tag
-compute-ver ┘                              └──→ deploy
+detect ──→ helm-lint      (if helm or Dockerfile changed)
+       ├── sast            (if Dockerfile changed)
+       └── compute-version (if helm or Dockerfile changed)
+                └──→ build-push     (if Dockerfile changed)
+                           └──→ security-scan
+                                      └──→ bump-and-tag → deploy
 ```
 
-| Job | Description |
-|---|---|
-| `helm-lint` | Helm chart validation |
-| `sast` | Semgrep scan, fails on ERROR |
-| `compute-version` | Reads `appVersion` from `Chart.yaml`, bumps patch (e.g. `1.0.0 → 1.0.1`) |
-| `build-push` | Pushes `ghcr.io/.../game2048:1.0.1` + `latest` |
-| `security-scan` | Trivy — blocks deploy on HIGH/CRITICAL |
-| `bump-and-tag` | Creates git tag `v1.0.1` on merge commit + bumps `Chart.yaml` |
-| `deploy` | Triggers ArgoCD sync for immediate deployment |
+| Job | Runs when | Description |
+|---|---|---|
+| `detect` | always | Detects changed paths |
+| `helm-lint` | helm OR Dockerfile changed | Helm chart validation |
+| `sast` | Dockerfile changed | Semgrep scan, fails on ERROR |
+| `compute-version` | helm OR Dockerfile changed | Dockerfile changed → bump appVersion + chart version; helm-only → bump chart version only |
+| `build-push` | Dockerfile changed | Pushes `ghcr.io/.../game2048:{appVersion}` + `latest` |
+| `security-scan` | Dockerfile changed | Trivy — blocks deploy on fixable HIGH/CRITICAL CVEs |
+| `bump-and-tag` | any change (safe gate) | Updates `Chart.yaml`, creates git tag only on image changes |
+| `deploy` | bump-and-tag succeeded | Triggers ArgoCD sync for immediate deployment |
 
 ### Docker build & registry
 
