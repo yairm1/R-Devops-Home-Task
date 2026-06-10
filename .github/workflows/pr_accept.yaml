@@ -146,6 +146,7 @@ jobs:
             echo "Helm-only change → keeping appVersion: $CURRENT_APP (same image)"
           fi
 
+          echo "Chart version → bumping: $CURRENT_CHART → $NEXT_CHART"
           echo "chart_version=${NEXT_CHART}" >> "$GITHUB_OUTPUT"
           echo "app_version=${NEXT_APP}" >> "$GITHUB_OUTPUT"
 
