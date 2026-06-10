@@ -167,7 +167,28 @@ Images are pushed to **GitHub Container Registry (ghcr.io)** — a private regis
 | [Semgrep](https://semgrep.dev) | SAST | Fails pipeline on ERROR-severity findings |
 | [Trivy](https://trivy.dev) | Image CVE scan | Blocks deploy on HIGH or CRITICAL CVEs |
 
-> SARIF results are uploaded to the GitHub Security tab (requires GitHub Advanced Security for private repos).
+#### Trivy dual-step pattern
+
+Trivy runs **twice** per pipeline to serve two purposes:
+
+| Step | Format | exit-code | Purpose |
+|---|---|---|---|
+| Step 1 | `table` | `0` | Prints human-readable CVE list in the job log (always visible, never blocks) |
+| Step 2 | `sarif` | `1` | Gates the pipeline (fails on fixable HIGH/CRITICAL) + feeds GitHub Security tab |
+
+Both steps use `ignore-unfixed: true` — CVEs with no available fix are shown but do not block the pipeline.
+
+#### GitHub Security tab (SARIF upload)
+
+The SARIF file produced by Trivy is uploaded to GitHub via `github/codeql-action/upload-sarif@v3`. This populates the **Security → Code scanning alerts** tab on the repository with structured vulnerability data:
+
+```
+Security → Code scanning alerts
+  ⚠ HIGH   libssl CVE-2024-xxxx  (nginx:alpine)
+  ⚠ HIGH   libcrypto CVE-...     (nginx:alpine)
+```
+
+> **Note:** The Security tab upload requires **GitHub Advanced Security**, which is free for public repos but a paid feature for private repos. The upload step uses `continue-on-error: true` so the pipeline is not blocked if the upload fails — but the SARIF exit-code gate still prevents a vulnerable image from being merged.
 
 > **Note on dependency scanning:** Since this is a static HTML/JS app with no package manager (`npm`/`pip`/etc.), tools like `npm audit` or OWASP Dependency-Check are not applicable. Trivy covers OS-level package CVEs in the nginx base image.
 
