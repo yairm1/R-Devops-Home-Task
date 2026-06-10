@@ -16,11 +16,43 @@ env:
 
 jobs:
   # ──────────────────────────────────────────
-  # Job 1: Helm lint
+  # Job 1: Detect changed paths
+  # Drives conditional execution of downstream jobs:
+  #   image → Dockerfile changed → rebuild image, bump appVersion + chart version
+  #   helm  → helm/** changed only → re-lint + bump chart version only (same image)
+  # fetch-depth: 2 required for push events to diff against previous commit
+  # ──────────────────────────────────────────
+  detect:
+    name: Detect Changed Paths
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.filter.outputs.image }}
+      helm: ${{ steps.filter.outputs.helm }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            image:
+              - 'Dockerfile'
+            helm:
+              - 'helm/**'
+
+  # ──────────────────────────────────────────
+  # Job 2: Helm lint
+  # Runs when helm chart or Dockerfile changed
   # ──────────────────────────────────────────
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.image == 'true' || needs.detect.outputs.helm == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,12 +64,14 @@ jobs:
         run: helm lint ./helm/game2048
 
   # ──────────────────────────────────────────
-  # Job 2: SAST — Semgrep
-  # Fails on ERROR-severity findings (high confidence)
+  # Job 3: SAST — Semgrep
+  # Only runs when Dockerfile changed (image rebuild needed)
   # ──────────────────────────────────────────
   sast:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       security-events: write
@@ -64,14 +98,24 @@ jobs:
           sarif_file: semgrep.sarif
 
   # ──────────────────────────────────────────
-  # Job 3: Compute next semantic version
-  # Reads VERSION file and bumps patch (e.g. 1.0.0 → 1.0.1)
+  # Job 4: Compute next semantic version
+  # Runs when anything meaningful changed
+  #
+  # Version strategy:
+  #   Dockerfile changed → bump BOTH appVersion AND chart version
+  #   Helm-only changed  → bump chart version ONLY (same image, new config)
+  #
+  # This ensures ArgoCD always syncs on any release, but the Docker
+  # image tag only changes when the application code actually changed.
   # ──────────────────────────────────────────
   compute-version:
     name: Compute Next Version
     runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.image == 'true' || needs.detect.outputs.helm == 'true'
     outputs:
-      version: ${{ steps.bump.outputs.version }}
+      app_version: ${{ steps.bump.outputs.app_version }}
+      chart_version: ${{ steps.bump.outputs.chart_version }}
 
     steps:
       - name: Checkout
@@ -82,30 +126,45 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Bump patch version from Chart.yaml
+      - name: Compute versions
         id: bump
         run: |
-          CURRENT=$(yq '.appVersion' helm/game2048/Chart.yaml | tr -d '"')
-          IFS='.' read -r major minor patch <<< "$CURRENT"
-          NEXT="${major}.${minor}.$((patch + 1))"
-          echo "Current appVersion: $CURRENT → Next: $NEXT"
-          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+          CURRENT_APP=$(yq '.appVersion' helm/game2048/Chart.yaml | tr -d '"')
+          CURRENT_CHART=$(yq '.version' helm/game2048/Chart.yaml)
+
+          # Always bump chart version (any release changes the chart)
+          IFS='.' read -r major minor patch <<< "$CURRENT_CHART"
+          NEXT_CHART="${major}.${minor}.$((patch + 1))"
+
+          # Only bump appVersion if Dockerfile changed (new image)
+          if [[ "${{ needs.detect.outputs.image }}" == "true" ]]; then
+            IFS='.' read -r major minor patch <<< "$CURRENT_APP"
+            NEXT_APP="${major}.${minor}.$((patch + 1))"
+            echo "Dockerfile changed → bumping appVersion: $CURRENT_APP → $NEXT_APP"
+          else
+            NEXT_APP="$CURRENT_APP"
+            echo "Helm-only change → keeping appVersion: $CURRENT_APP (same image)"
+          fi
+
+          echo "chart_version=${NEXT_CHART}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${NEXT_APP}" >> "$GITHUB_OUTPUT"
 
   # ──────────────────────────────────────────
-  # Job 4: Build and push release image
-  # Tags: <version> + latest
+  # Job 5: Build and push release image
+  # Only runs when Dockerfile changed
+  # Tags: <appVersion> + latest
   # ──────────────────────────────────────────
   build-push:
     name: Build & Push Release Image
     runs-on: ubuntu-latest
-    needs: [helm-lint, sast, compute-version]
+    needs: [detect, helm-lint, sast, compute-version]
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       packages: write
 
     outputs:
-      version: ${{ needs.compute-version.outputs.version }}
-      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.version }}
+      full_image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.app_version }}
 
     steps:
       - name: Checkout
@@ -124,17 +183,19 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.compute-version.outputs.app_version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
   # ──────────────────────────────────────────
-  # Job 5: Docker image vulnerability scan
-  # Blocks deploy on HIGH or CRITICAL
+  # Job 6: Docker image vulnerability scan
+  # Only runs when a new image was built
+  # Blocks release on HIGH or CRITICAL fixable CVEs
   # ──────────────────────────────────────────
   security-scan:
     name: Image Vulnerability Scan (Trivy)
     runs-on: ubuntu-latest
-    needs: build-push
+    needs: [detect, build-push]
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       packages: read
@@ -177,14 +238,30 @@ jobs:
           sarif_file: trivy.sarif
 
   # ──────────────────────────────────────────
-  # Job 6: Tag release commit + bump Chart.yaml
-  # Git tag points to the exact merge commit (github.sha)
-  # Chart.yaml bump is a follow-up [skip ci] commit
+  # Job 7: Tag release commit + bump Chart.yaml
+  #
+  # Safety gate — only runs if ALL required jobs passed:
+  #   - helm-lint must succeed (always required)
+  #   - sast must succeed OR was skipped (skipped = helm-only change, no image)
+  #   - build-push must succeed OR was skipped (skipped = helm-only change)
+  #   - security-scan must succeed OR was skipped (skipped = helm-only change)
+  #
+  # Version bump logic:
+  #   - Always bumps chart version (every release updates the chart)
+  #   - Only bumps appVersion if Dockerfile changed (new image was built)
+  #   - Git tag (v{appVersion}) only created on image changes
   # ──────────────────────────────────────────
   bump-and-tag:
     name: Tag Release & Bump Chart.yaml
     runs-on: ubuntu-latest
-    needs: [security-scan, compute-version]
+    needs: [detect, helm-lint, sast, compute-version, build-push, security-scan]
+    if: |
+      always() &&
+      (needs.detect.outputs.image == 'true' || needs.detect.outputs.helm == 'true') &&
+      needs.helm-lint.result == 'success' &&
+      (needs.sast.result == 'success' || needs.sast.result == 'skipped') &&
+      (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') &&
+      (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped')
     permissions:
       contents: write
 
@@ -199,27 +276,33 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Create git tag on merge commit
+      - name: Create git tag on merge commit (image changes only)
+        if: needs.detect.outputs.image == 'true'
         run: |
-          git tag "v${{ needs.compute-version.outputs.version }}" "${{ github.sha }}"
-          git push origin "v${{ needs.compute-version.outputs.version }}"
+          git tag "v${{ needs.compute-version.outputs.app_version }}" "${{ github.sha }}"
+          git push origin "v${{ needs.compute-version.outputs.app_version }}"
 
-      - name: Bump appVersion and version in Chart.yaml
+      - name: Bump Chart.yaml
         run: |
-          NEW="${{ needs.compute-version.outputs.version }}"
-          yq -i ".appVersion = \"${NEW}\"" helm/game2048/Chart.yaml
-          # also bump chart version patch to keep chart and app versions in sync
-          CHART_VER=$(yq '.version' helm/game2048/Chart.yaml)
-          IFS='.' read -r major minor patch <<< "$CHART_VER"
-          yq -i ".version = \"${major}.${minor}.$((patch + 1))\"" helm/game2048/Chart.yaml
+          NEW_APP="${{ needs.compute-version.outputs.app_version }}"
+          NEW_CHART="${{ needs.compute-version.outputs.chart_version }}"
+
+          yq -i ".version = \"${NEW_CHART}\"" helm/game2048/Chart.yaml
+          yq -i ".appVersion = \"${NEW_APP}\"" helm/game2048/Chart.yaml
+
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add helm/game2048/Chart.yaml
-          git commit -m "ci: bump Chart.yaml to appVersion=${NEW} [skip ci]"
+
+          if [[ "${{ needs.detect.outputs.image }}" == "true" ]]; then
+            git commit -m "ci: bump Chart.yaml appVersion=${NEW_APP} version=${NEW_CHART} [skip ci]"
+          else
+            git commit -m "ci: bump Chart.yaml version=${NEW_CHART} (helm-only change) [skip ci]"
+          fi
           git push
 
   # ──────────────────────────────────────────
-  # Job 7: Trigger ArgoCD Sync
+  # Job 8: Trigger ArgoCD sync
   #
   # PURPOSE:
   #   ArgoCD already watches master and auto-syncs every ~3 minutes.
@@ -244,7 +327,11 @@ jobs:
   deploy:
     name: Trigger ArgoCD Sync
     runs-on: ubuntu-latest
-    needs: [security-scan, bump-and-tag]
+    needs: [detect, bump-and-tag]
+    if: |
+      always() &&
+      needs.bump-and-tag.result == 'success' &&
+      (needs.detect.outputs.image == 'true' || needs.detect.outputs.helm == 'true')
     environment: production
     continue-on-error: true  # gracefully skip if ARGOCD_SERVER is not reachable (local dev)
 

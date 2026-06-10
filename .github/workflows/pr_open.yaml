@@ -11,11 +11,40 @@ env:
 
 jobs:
   # ──────────────────────────────────────────
-  # Job 1: Helm lint
+  # Job 1: Detect changed paths
+  # Drives conditional execution of downstream jobs:
+  #   image → Dockerfile changed (rebuild image)
+  #   helm  → helm/** changed (re-lint chart only)
+  # ──────────────────────────────────────────
+  detect:
+    name: Detect Changed Paths
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.filter.outputs.image }}
+      helm: ${{ steps.filter.outputs.helm }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            image:
+              - 'Dockerfile'
+            helm:
+              - 'helm/**'
+
+  # ──────────────────────────────────────────
+  # Job 2: Helm lint
+  # Runs when helm chart or Dockerfile changed
   # ──────────────────────────────────────────
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.image == 'true' || needs.detect.outputs.helm == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,13 +56,15 @@ jobs:
         run: helm lint ./helm/game2048
 
   # ──────────────────────────────────────────
-  # Job 2: SAST — Semgrep
+  # Job 3: SAST — Semgrep
+  # Only runs when Dockerfile changed (image rebuild needed)
   # Fails on ERROR-severity findings (high confidence)
-  # Uploads SARIF to GitHub Security tab (requires Advanced Security on private repos)
   # ──────────────────────────────────────────
   sast:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       security-events: write
@@ -60,14 +91,16 @@ jobs:
           sarif_file: semgrep.sarif
 
   # ──────────────────────────────────────────
-  # Job 3: Build and push snapshot image
-  # Tag format: v<appVersion>-pr<number>-g<sha>  (mirrors propen_image_build convention)
-  # Image repo: snap-game2048  (distinguishes snapshots from releases)
+  # Job 4: Build and push snapshot image
+  # Only runs when Dockerfile changed
+  # Tag format: v<appVersion>-pr<number>-g<sha>
+  # Image repo: snap-game2048 (distinguishes snapshots from releases)
   # ──────────────────────────────────────────
   build-push:
     name: Build & Push Snapshot Image
     runs-on: ubuntu-latest
-    needs: [helm-lint, sast]
+    needs: [detect, helm-lint, sast]
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       packages: write
@@ -105,13 +138,15 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.ver.outputs.appver }}-pr${{ github.event.pull_request.number }}-g${{ steps.sha.outputs.short }}
 
   # ──────────────────────────────────────────
-  # Job 4: Docker image vulnerability scan
-  # Fails on HIGH or CRITICAL — same gate as master
+  # Job 5: Docker image vulnerability scan
+  # Only runs when a new image was built
+  # Fails on HIGH or CRITICAL fixable CVEs
   # ──────────────────────────────────────────
   security-scan:
     name: Image Vulnerability Scan (Trivy)
     runs-on: ubuntu-latest
-    needs: build-push
+    needs: [detect, build-push]
+    if: needs.detect.outputs.image == 'true'
     permissions:
       contents: read
       packages: read
