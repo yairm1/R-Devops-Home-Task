@@ -70,10 +70,65 @@ docker build -t game2048:local .
 
 # 2. Install the chart
 helm upgrade --install game2048 ./helm/game2048
+```
 
-# 3. Access the app
-kubectl port-forward svc/game2048-game2048 8080:80
-# → open http://localhost:8080
+#### Prerequisites — one-time setup
+
+**Nginx Ingress Controller** (single entry point for all cluster traffic):
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
+```
+
+**Add hostnames to `/etc/hosts`:**
+```bash
+echo "127.0.0.1 game2048.local" | sudo tee -a /etc/hosts
+echo "127.0.0.1 argocd.local"   | sudo tee -a /etc/hosts
+```
+
+**Patch ArgoCD to HTTP mode** (enables HTTP access via Ingress — fine for local dev):
+```bash
+kubectl patch configmap argocd-cmd-params-cm -n argocd \
+  --type merge -p '{"data":{"server.insecure":"true"}}'
+kubectl rollout restart deployment argocd-server -n argocd
+```
+
+**Apply ArgoCD Ingress:**
+```bash
+kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-ingress
+  namespace: argocd
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: argocd.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: argocd-server
+            port:
+              number: 80
+EOF
+```
+
+#### Accessing the apps (no port-forward needed)
+
+| App | URL | Notes |
+|---|---|---|
+| **2048 Game** | http://game2048.local | Served via nginx Ingress |
+| **ArgoCD UI** | http://argocd.local | Username: `admin` |
+
+Get the ArgoCD admin password:
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d && echo
 ```
 
 ---
