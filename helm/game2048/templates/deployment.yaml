@@ -6,6 +6,7 @@ metadata:
     {{- include "game2048.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       {{- include "game2048.selectorLabels" . | nindent 6 }}
