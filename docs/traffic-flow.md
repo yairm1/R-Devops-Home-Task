@@ -15,9 +15,10 @@ flowchart TD
         end
 
         subgraph App["Application (game2048 namespace)"]
-            SVC["Service\nClusterIP\nPort 80"]
+            SVC["Service (ClusterIP)\nVirtual IP + DNS\nPort 80"]
+            KP["kube-proxy\niptables rules\n(runs on every node)"]
             POD1["Pod 1\nnginx:alpine\nPort 80"]
-            POD2["Pod 2\nnginx:alpine\nPort 80"]
+            POD2["Pod N\nnginx:alpine\nPort 80"]
         end
 
         subgraph Config["Configuration"]
@@ -29,8 +30,9 @@ flowchart TD
     Hosts -->|"127.0.0.1:80"| IC
     IC -->|"matches host + path rule"| IR
     IR -->|"routes to backend Service"| SVC
-    SVC -->|"load balances"| POD1
-    SVC -->|"load balances"| POD2
+    SVC -->|"virtual IP resolves via"| KP
+    KP -->|"iptables random distribution"| POD1
+    KP -->|"iptables random distribution"| POD2
     CM -->|"mounted at\n/etc/nginx/conf.d/default.conf"| POD1
     CM -->|"mounted at\n/etc/nginx/conf.d/default.conf"| POD2
 ```
@@ -42,7 +44,8 @@ flowchart TD
 | `/etc/hosts` | Maps `game2048.local` to `127.0.0.1` (local dev only) |
 | **Nginx Ingress Controller** | Single entry point for all cluster traffic. Listens on host port 80, reads Ingress rules |
 | **Ingress Resource** | Routing rule: requests for `game2048.local/` → forward to the `game2048` Service |
-| **Service (ClusterIP)** | Stable internal DNS name + load balancer across all matching Pods |
+| **Service (ClusterIP)** | Stable virtual IP + DNS name (`game2048-game2048.game2048.svc.cluster.local`). Does NOT load balance by itself — it's just an address |
+| **kube-proxy** | Runs on every node. Programs `iptables` rules that distribute traffic across all healthy pod IPs (random selection ≈ round-robin). This is the actual load balancer |
 | **Pod (nginx:alpine)** | Serves the 2048 static HTML/JS/CSS files |
 | **ConfigMap** | Custom `nginx.conf` — adds security headers (`X-Frame-Options`, `CSP`) and caching rules; mounted into every Pod |
 
