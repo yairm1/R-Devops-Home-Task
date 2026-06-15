@@ -1,18 +1,22 @@
 name: Release Drafter
 
 on:
-  pull_request:
-    types: [closed]
+  # Wait for pr_accept to finish before creating the release
+  # This ensures the release points to the bumped Chart.yaml commit
+  workflow_run:
+    workflows: ["PRaccept – SAST, build release image, deploy"]
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
   draft-release:
     name: Draft GitHub Release
-    # Only run when PR is actually merged (not just closed)
+    # Only run when pr_accept succeeded (or manual trigger)
     if: >
       (github.event_name == 'workflow_dispatch') ||
-      (github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true)
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
