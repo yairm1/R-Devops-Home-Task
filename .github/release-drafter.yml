@@ -1,0 +1,48 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+template: |
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+
+categories:
+  - title: '💥 Breaking Changes'
+    labels: ['breaking', 'breaking-change', 'major']
+
+  - title: '🚀 Features'
+    labels: ['feature', 'feat', 'enhancement', 'new']
+
+  - title: '🐛 Bug Fixes'
+    labels: ['bug', 'fix', 'bugfix', 'hotfix']
+
+  - title: '🔒 Security'
+    labels: ['security', 'vulnerability', 'cve']
+
+  - title: '🔧 CI/CD'
+    labels: ['ci', 'cd', 'workflow', 'github-actions']
+
+  - title: '📚 Documentation'
+    labels: ['docs', 'documentation', 'doc']
+
+  - title: '🧰 Maintenance'
+    labels: ['chore', 'maintenance', 'refactor', 'cleanup']
+
+version-resolver:
+  major:
+    labels: ['breaking', 'breaking-change', 'major']
+  minor:
+    labels: ['feature', 'feat', 'enhancement', 'new']
+  patch:
+    labels: ['bug', 'fix', 'bugfix', 'hotfix', 'security', 'vulnerability',
+             'ci', 'cd', 'workflow', 'github-actions',
+             'docs', 'documentation', 'doc',
+             'chore', 'maintenance', 'refactor', 'cleanup']
+  default: patch
+
+change-template: '$TITLE (#$NUMBER) — **$AUTHOR**'
+change-title-escapes: '\<*_&'
+
+exclude-labels:
+  - 'skip-changelog'
+  - 'wip'

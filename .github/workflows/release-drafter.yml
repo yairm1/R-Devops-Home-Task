@@ -1,0 +1,40 @@
+name: Release Drafter
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+jobs:
+  draft-release:
+    name: Draft GitHub Release
+    # Only run when PR is actually merged (not just closed)
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Draft and publish release
+        id: drafter
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+          publish: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "Tag:  ${{ steps.drafter.outputs.tag_name }}"
+          echo "Name: ${{ steps.drafter.outputs.name }}"
+          echo "URL:  ${{ steps.drafter.outputs.html_url }}"
