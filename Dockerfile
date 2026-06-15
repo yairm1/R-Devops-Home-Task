@@ -1,6 +1,6 @@
 FROM nginx:alpine
 LABEL org.opencontainers.image.source="https://github.com/yairm1/R-Devops-Home-Task"
-LABEL test
+LABEL test="https://testing.com"
 RUN apk upgrade --no-cache && \
     apk add --no-cache git && \
     rm -rf /usr/share/nginx/html && \
