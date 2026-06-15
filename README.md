@@ -180,6 +180,8 @@ detect ──→ helm-lint      (if helm or Dockerfile changed)
                 └──→ build-push     (if Dockerfile changed)
                            └──→ security-scan
                                       └──→ bump-and-tag → deploy
+
+on success → release-drafter.yml runs → creates GitHub Release
 ```
 
 | Job | Runs when | Description |
@@ -190,8 +192,29 @@ detect ──→ helm-lint      (if helm or Dockerfile changed)
 | `compute-version` | helm OR Dockerfile changed | Dockerfile changed → bump appVersion + chart version; helm-only → bump chart version only |
 | `build-push` | Dockerfile changed | Pushes `ghcr.io/.../game2048:{appVersion}` + `latest` |
 | `security-scan` | Dockerfile changed | Trivy — blocks deploy on fixable HIGH/CRITICAL CVEs |
-| `bump-and-tag` | any change (safe gate) | Updates `Chart.yaml`, creates git tag only on image changes |
+| `bump-and-tag` | any change (safe gate) | Updates `Chart.yaml` and pushes to master |
 | `deploy` | bump-and-tag succeeded | Triggers ArgoCD sync for immediate deployment |
+
+### `release-drafter.yml` — triggered when `pr_accept` succeeds
+
+Automatically creates a **GitHub Release** with a categorized changelog after every successful merge to master.
+
+- Reads PR labels to categorize changes and determine version bump
+- Creates a git tag (`v{version}`) and a published GitHub Release
+- Runs **after** `pr_accept` completes — ensures the release points to the final bumped commit
+
+| PR Label | Category in release notes | Version bump |
+|---|---|---|
+| `feat`, `feature` | 🚀 Features | minor |
+| `fix`, `bug` | 🐛 Bug Fixes | patch |
+| `security`, `cve` | 🔒 Security | patch |
+| `ci`, `cd` | 🔧 CI/CD | patch |
+| `docs` | 📚 Documentation | patch |
+| `breaking` | 💥 Breaking Changes | major |
+| `chore`, `refactor` | 🧰 Maintenance | patch |
+| *(no label)* | *(uncategorized)* | patch |
+
+> Add a `skip-changelog` label to exclude a PR from release notes entirely.
 
 ### Docker build & registry
 
