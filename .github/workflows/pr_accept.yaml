@@ -253,7 +253,7 @@ jobs:
   #   - Git tag (v{appVersion}) only created on image changes
   # ──────────────────────────────────────────
   bump-and-tag:
-    name: Tag Release & Bump Chart.yaml
+    name: Bump Chart.yaml
     runs-on: ubuntu-latest
     needs: [detect, helm-lint, sast, compute-version, build-push, security-scan]
     if: |
@@ -276,12 +276,6 @@ jobs:
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
-
-      - name: Create git tag on merge commit (image changes only)
-        if: needs.detect.outputs.image == 'true'
-        run: |
-          git tag "v${{ needs.compute-version.outputs.app_version }}" "${{ github.sha }}"
-          git push origin "v${{ needs.compute-version.outputs.app_version }}"
 
       - name: Bump Chart.yaml
         run: |
